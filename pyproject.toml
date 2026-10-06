@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codeatlas"
+version = "0.1.0"
+description = "Repository Intelligence & Codebase Architecture Analyzer"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "CodeAtlas Team" }]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --asyncio-mode=auto"
+testpaths = ["backend/tests"]
+pythonpath = ["."]
