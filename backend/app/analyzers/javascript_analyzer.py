@@ -1,8 +1,5 @@
+import re
 from pathlib import Path
-
-import tree_sitter
-import tree_sitter_javascript
-import tree_sitter_typescript
 
 from backend.app.analyzers.base import (
     BaseLanguageAnalyzer,
@@ -13,16 +10,11 @@ from backend.app.analyzers.base import (
 
 
 class JavaScriptTypeScriptAnalyzer(BaseLanguageAnalyzer):
-    """AST-based static code analyzer for JavaScript and TypeScript using Tree-sitter."""
-
-    def __init__(self) -> None:
-        self.js_language = tree_sitter.Language(tree_sitter_javascript.language())
-        self.ts_language = tree_sitter.Language(tree_sitter_typescript.language_typescript())
-        self.tsx_language = tree_sitter.Language(tree_sitter_typescript.language_tsx())
-
-        self.js_parser = tree_sitter.Parser(self.js_language)
-        self.ts_parser = tree_sitter.Parser(self.ts_language)
-        self.tsx_parser = tree_sitter.Parser(self.tsx_language)
+    """
+    Robust static code analyzer for JavaScript and TypeScript.
+    Extracts modules, classes, interfaces, methods, functions, inheritance,
+    imports, call graphs, and cyclomatic complexity without native crash risks.
+    """
 
     @property
     def supported_languages(self) -> list[str]:
@@ -31,13 +23,6 @@ class JavaScriptTypeScriptAnalyzer(BaseLanguageAnalyzer):
     @property
     def supported_extensions(self) -> list[str]:
         return [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]
-
-    def _get_parser_for_ext(self, ext: str) -> tree_sitter.Parser:
-        if ext == ".tsx":
-            return self.tsx_parser
-        elif ext in {".ts"}:
-            return self.ts_parser
-        return self.js_parser
 
     def _module_path_from_rel_path(self, rel_path: str) -> str:
         """Converts 'src/services/userService.ts' to 'src/services/userService'."""
@@ -50,29 +35,25 @@ class JavaScriptTypeScriptAnalyzer(BaseLanguageAnalyzer):
         return "/".join(parts)
 
     def parse_file(self, file_path: str, content: bytes, rel_path: str) -> FileAnalysisResult:
-        ext = Path(rel_path).suffix.lower()
-        parser = self._get_parser_for_ext(ext)
-        tree = parser.parse(content)
-        root_node = tree.root_node
-
-        module_qname = self._module_path_from_rel_path(rel_path)
-        is_ts = ext in {".ts", ".tsx"}
-        language = "TypeScript" if is_ts else "JavaScript"
-
-        symbols: list[ParsedSymbol] = []
-        edges: list[ParsedEdge] = []
-
-        # Line metrics calculation
-        lines = content.decode("utf-8", errors="ignore").splitlines()
+        source_text = content.decode("utf-8", errors="ignore")
+        lines = source_text.splitlines()
         total_lines = len(lines)
         blank_lines = sum(1 for line in lines if not line.strip())
         comment_lines = sum(
-            1 for line in lines if line.strip().startswith("//") or line.strip().startswith("/*")
+            1
+            for line in lines
+            if line.strip().startswith("//")
+            or line.strip().startswith("/*")
+            or line.strip().startswith("*")
         )
         loc = max(0, total_lines - blank_lines - comment_lines)
 
-        # Register Module Symbol
-        symbols.append(
+        ext = Path(rel_path).suffix.lower()
+        is_ts = ext in {".ts", ".tsx"}
+        language = "TypeScript" if is_ts else "JavaScript"
+        module_qname = self._module_path_from_rel_path(rel_path)
+
+        symbols: list[ParsedSymbol] = [
             ParsedSymbol(
                 name=Path(rel_path).stem,
                 qualified_name=module_qname,
@@ -81,305 +62,291 @@ class JavaScriptTypeScriptAnalyzer(BaseLanguageAnalyzer):
                 end_line=max(1, total_lines),
                 metadata={"file_path": rel_path, "language": language},
             )
+        ]
+        edges: list[ParsedEdge] = []
+
+        # 1. Cyclomatic Complexity
+        # Count decision keywords and logical operators
+        decision_patterns = [
+            r"\bif\b",
+            r"\belse\s+if\b",
+            r"\bfor\b",
+            r"\bwhile\b",
+            r"\bcase\b",
+            r"\bcatch\b",
+            r"\bdo\b",
+            r"\?",
+            r"&&",
+            r"\|\|",
+            r"\?\?",
+        ]
+        decision_count = 0
+        for pattern in decision_patterns:
+            decision_count += len(re.findall(pattern, source_text))
+        cyclomatic_complexity = float(max(1, 1 + decision_count))
+
+        # 2. Extract Imports (ES6, CommonJS, dynamic import)
+        import_re = re.compile(
+            r"""(?:import\s+(?:(?:[\w*\s{},$]+)\s+from\s+)?['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*\(\s*['"]([^'"]+)['"]\s*\))"""
+        )
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("//") or stripped.startswith("/*"):
+                continue
+            for match in import_re.finditer(line):
+                target = match.group(1) or match.group(2) or match.group(3)
+                if target:
+                    edges.append(
+                        ParsedEdge(
+                            source=module_qname,
+                            target=target,
+                            edge_type="imports",
+                            line_number=idx,
+                        )
+                    )
+
+        # 3. Regular Expressions for Declarations
+        # export class Foo extends Bar implements Baz, Qux {
+        class_re = re.compile(
+            r"^(?:export\s+)?(?:default\s+)?class\s+([A-Za-z0-9_$]+)(?:\s+extends\s+([A-Za-z0-9_$.]+))?(?:\s+implements\s+([A-Za-z0-9_$,\s]+))?"
+        )
+        # export interface Foo extends Bar {
+        interface_re = re.compile(
+            r"^(?:export\s+)?interface\s+([A-Za-z0-9_$]+)(?:\s+extends\s+([A-Za-z0-9_$,\s]+))?"
+        )
+        # function funcName(...)
+        func_re = re.compile(
+            r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\("
+        )
+        # const/let/var funcName = (async)? (...) => or function
+        var_func_re = re.compile(
+            r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>"
+        )
+        # Method inside class: methodName(...) {
+        method_re = re.compile(
+            r"^(?:public\s+|private\s+|protected\s+|static\s+|async\s+|get\s+|set\s+)*([A-Za-z0-9_$]+)\s*\([^)]*\)\s*(?::\s*[^;{]+)?\s*\{"
         )
 
-        decision_count = 0
+        current_class: str | None = None
+        current_class_qname: str | None = None
+        class_brace_depth = 0
+        current_brace_depth = 0
 
-        def traverse(node: tree_sitter.Node, current_scope: str, current_class: str | None = None) -> None:
-            nonlocal decision_count
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith("//")
+                or stripped.startswith("/*")
+                or stripped.startswith("*")
+            ):
+                continue
 
-            # Cyclomatic complexity decision points
-            if node.type in {
-                "if_statement",
-                "for_statement",
-                "for_in_statement",
-                "while_statement",
-                "do_statement",
-                "switch_case",
-                "catch_clause",
-                "conditional_expression",
-            }:
-                decision_count += 1
-            elif node.type == "binary_expression":
-                # Check for logical operators &&, ||, ??
-                for child in node.children:
-                    if child.type in {"&&", "||", "??"}:
-                        decision_count += 1
-                        break
-
-            # ES6 Import statement: import { x } from './y'
-            if node.type == "import_statement":
-                line_no = node.start_point.row + 1
-                source_node = node.child_by_field_name("source")
-                if source_node:
-                    import_path = source_node.text.decode("utf-8").strip("'\"`")
-                    edges.append(
-                        ParsedEdge(
-                            source=current_scope,
-                            target=import_path,
-                            edge_type="imports",
-                            line_number=line_no,
-                        )
+            # Check interface
+            if_match = interface_re.match(stripped)
+            if if_match:
+                if_name = if_match.group(1)
+                if_qname = f"{module_qname}.{if_name}"
+                symbols.append(
+                    ParsedSymbol(
+                        name=if_name,
+                        qualified_name=if_qname,
+                        symbol_type="interface",
+                        start_line=idx,
+                        end_line=idx,
                     )
-
-            # CommonJS require('...')
-            elif node.type == "call_expression":
-                func_node = node.child_by_field_name("function")
-                if func_node:
-                    func_name = func_node.text.decode("utf-8")
-                    line_no = node.start_point.row + 1
-                    if func_name == "require":
-                        args_node = node.child_by_field_name("arguments")
-                        if args_node and len(args_node.children) > 1:
-                            req_target = args_node.children[1].text.decode("utf-8").strip("'\"`")
-                            edges.append(
-                                ParsedEdge(
-                                    source=current_scope,
-                                    target=req_target,
-                                    edge_type="imports",
-                                    line_number=line_no,
-                                )
-                            )
-                    elif func_name not in {"console.log", "console.error", "console.warn", "require"}:
+                )
+                edges.append(
+                    ParsedEdge(
+                        source=module_qname,
+                        target=if_qname,
+                        edge_type="contains",
+                        line_number=idx,
+                    )
+                )
+                if if_match.group(2):
+                    for parent_if in [
+                        p.strip() for p in if_match.group(2).split(",") if p.strip()
+                    ]:
                         edges.append(
                             ParsedEdge(
-                                source=current_scope,
-                                target=func_name,
-                                edge_type="calls",
-                                line_number=line_no,
+                                source=if_qname,
+                                target=parent_if,
+                                edge_type="inherits",
+                                line_number=idx,
                             )
                         )
 
-            # Class Declaration
-            elif node.type in {"class_declaration", "class"}:
-                process_class(node, current_scope)
-                return
-
-            # Function Declaration
-            elif node.type == "function_declaration":
-                process_function(node, current_scope, current_class)
-                return
-
-            # TypeScript Interface Declaration
-            elif node.type == "interface_declaration":
-                name_node = node.child_by_field_name("name")
-                if name_node:
-                    if_name = name_node.text.decode("utf-8")
-                    if_qname = f"{current_scope}.{if_name}"
-                    start_line = node.start_point.row + 1
-                    end_line = node.end_point.row + 1
-
-                    symbols.append(
-                        ParsedSymbol(
-                            name=if_name,
-                            qualified_name=if_qname,
-                            symbol_type="interface",
-                            start_line=start_line,
-                            end_line=end_line,
-                        )
-                    )
+            # Check class
+            class_match = class_re.match(stripped)
+            if class_match:
+                class_name = class_match.group(1)
+                class_qname = f"{module_qname}.{class_name}"
+                current_class = class_name
+                current_class_qname = class_qname
+                class_brace_depth = current_brace_depth + (line.count("{") - line.count("}"))
+                superclasses = []
+                interfaces = []
+                if class_match.group(2):
+                    sc = class_match.group(2).strip()
+                    superclasses.append(sc)
                     edges.append(
                         ParsedEdge(
-                            source=current_scope,
-                            target=if_qname,
-                            edge_type="contains",
-                            line_number=start_line,
+                            source=class_qname,
+                            target=sc,
+                            edge_type="inherits",
+                            line_number=idx,
                         )
                     )
+                if class_match.group(3):
+                    for iface in [
+                        i.strip() for i in class_match.group(3).split(",") if i.strip()
+                    ]:
+                        interfaces.append(iface)
+                        edges.append(
+                            ParsedEdge(
+                                source=class_qname,
+                                target=iface,
+                                edge_type="implements",
+                                line_number=idx,
+                            )
+                        )
 
-            # Export statement wrapping declarations
-            elif node.type == "export_statement":
-                for child in node.children:
-                    if child.type in {"class_declaration", "function_declaration", "interface_declaration"}:
-                        traverse(child, current_scope, current_class)
-                    elif child.type == "lexical_declaration":
-                        # e.g. export const myFunc = () => {}
-                        process_lexical_declaration(child, current_scope)
-                return
-
-            # Method definition inside class body
-            elif node.type == "method_definition":
-                process_method(node, current_scope, current_class)
-                return
-
-            for child in node.children:
-                traverse(child, current_scope, current_class)
-
-        def process_class(node: tree_sitter.Node, parent_scope: str) -> None:
-            name_node = node.child_by_field_name("name")
-            if not name_node:
-                # Find type_identifier or identifier in children
-                for c in node.children:
-                    if c.type in {"type_identifier", "identifier"}:
-                        name_node = c
-                        break
-            if not name_node:
-                return
-
-            class_name = name_node.text.decode("utf-8")
-            class_qname = f"{parent_scope}.{class_name}"
-            start_line = node.start_point.row + 1
-            end_line = node.end_point.row + 1
-
-            superclasses: list[str] = []
-            interfaces: list[str] = []
-
-            # Check class heritage
-            for child in node.children:
-                if child.type == "class_heritage":
-                    for heritage_clause in child.children:
-                        if heritage_clause.type == "extends_clause":
-                            for sc in heritage_clause.children:
-                                if sc.type in {"identifier", "type_identifier", "member_expression"}:
-                                    sc_name = sc.text.decode("utf-8")
-                                    superclasses.append(sc_name)
-                                    edges.append(
-                                        ParsedEdge(
-                                            source=class_qname,
-                                            target=sc_name,
-                                            edge_type="inherits",
-                                            line_number=start_line,
-                                        )
-                                    )
-                        elif heritage_clause.type == "implements_clause":
-                            for iface in heritage_clause.children:
-                                if iface.type in {"identifier", "type_identifier"}:
-                                    iface_name = iface.text.decode("utf-8")
-                                    interfaces.append(iface_name)
-                                    edges.append(
-                                        ParsedEdge(
-                                            source=class_qname,
-                                            target=iface_name,
-                                            edge_type="implements",
-                                            line_number=start_line,
-                                        )
-                                    )
-
-            symbols.append(
-                ParsedSymbol(
-                    name=class_name,
-                    qualified_name=class_qname,
-                    symbol_type="class",
-                    start_line=start_line,
-                    end_line=end_line,
-                    metadata={"superclasses": superclasses, "interfaces": interfaces},
+                symbols.append(
+                    ParsedSymbol(
+                        name=class_name,
+                        qualified_name=class_qname,
+                        symbol_type="class",
+                        start_line=idx,
+                        end_line=idx,
+                        metadata={"superclasses": superclasses, "interfaces": interfaces},
+                    )
                 )
-            )
-            edges.append(
-                ParsedEdge(
-                    source=parent_scope,
-                    target=class_qname,
-                    edge_type="contains",
-                    line_number=start_line,
+                edges.append(
+                    ParsedEdge(
+                        source=module_qname,
+                        target=class_qname,
+                        edge_type="contains",
+                        line_number=idx,
+                    )
                 )
-            )
 
-            # Traverse class body
-            body_node = node.child_by_field_name("body")
-            if body_node:
-                for child in body_node.children:
-                    traverse(child, class_qname, current_class=class_name)
-
-        def process_function(node: tree_sitter.Node, parent_scope: str, current_class: str | None) -> None:
-            name_node = node.child_by_field_name("name")
-            if not name_node:
-                return
-            func_name = name_node.text.decode("utf-8")
-            func_qname = f"{parent_scope}.{func_name}"
-            start_line = node.start_point.row + 1
-            end_line = node.end_point.row + 1
-
-            symbols.append(
-                ParsedSymbol(
-                    name=func_name,
-                    qualified_name=func_qname,
-                    symbol_type="function",
-                    start_line=start_line,
-                    end_line=end_line,
+            # Check function declaration
+            func_match = func_re.match(stripped)
+            if func_match and not class_match:
+                func_name = func_match.group(1)
+                func_qname = f"{module_qname}.{func_name}"
+                symbols.append(
+                    ParsedSymbol(
+                        name=func_name,
+                        qualified_name=func_qname,
+                        symbol_type="function",
+                        start_line=idx,
+                        end_line=idx,
+                    )
                 )
-            )
-            edges.append(
-                ParsedEdge(
-                    source=parent_scope,
-                    target=func_qname,
-                    edge_type="contains",
-                    line_number=start_line,
+                edges.append(
+                    ParsedEdge(
+                        source=module_qname,
+                        target=func_qname,
+                        edge_type="contains",
+                        line_number=idx,
+                    )
                 )
-            )
 
-            body_node = node.child_by_field_name("body")
-            if body_node:
-                for child in body_node.children:
-                    traverse(child, func_qname, current_class)
-
-        def process_method(node: tree_sitter.Node, parent_scope: str, current_class: str | None) -> None:
-            name_node = node.child_by_field_name("name")
-            if not name_node:
-                return
-            method_name = name_node.text.decode("utf-8")
-            method_qname = f"{parent_scope}.{method_name}"
-            start_line = node.start_point.row + 1
-            end_line = node.end_point.row + 1
-
-            symbols.append(
-                ParsedSymbol(
-                    name=method_name,
-                    qualified_name=method_qname,
-                    symbol_type="method",
-                    start_line=start_line,
-                    end_line=end_line,
-                    metadata={"parent_class": current_class},
+            # Check variable function (const foo = () => {})
+            var_func_match = var_func_re.match(stripped)
+            if var_func_match and not class_match and not func_match:
+                func_name = var_func_match.group(1)
+                func_qname = f"{module_qname}.{func_name}"
+                symbols.append(
+                    ParsedSymbol(
+                        name=func_name,
+                        qualified_name=func_qname,
+                        symbol_type="function",
+                        start_line=idx,
+                        end_line=idx,
+                    )
                 )
-            )
-            edges.append(
-                ParsedEdge(
-                    source=parent_scope,
-                    target=method_qname,
-                    edge_type="contains",
-                    line_number=start_line,
+                edges.append(
+                    ParsedEdge(
+                        source=module_qname,
+                        target=func_qname,
+                        edge_type="contains",
+                        line_number=idx,
+                    )
                 )
-            )
 
-            body_node = node.child_by_field_name("body")
-            if body_node:
-                for child in body_node.children:
-                    traverse(child, method_qname, current_class)
-
-        def process_lexical_declaration(node: tree_sitter.Node, parent_scope: str) -> None:
-            # Handles const myFunc = () => { ... }
-            for decl in node.children:
-                if decl.type == "variable_declarator":
-                    name_node = decl.child_by_field_name("name")
-                    value_node = decl.child_by_field_name("value")
-                    if name_node and value_node and value_node.type in {"arrow_function", "function"}:
-                        func_name = name_node.text.decode("utf-8")
-                        func_qname = f"{parent_scope}.{func_name}"
-                        start_line = decl.start_point.row + 1
-                        end_line = decl.end_point.row + 1
-
+            # Check method inside class
+            if current_class and current_brace_depth >= class_brace_depth - 1:
+                method_match = method_re.match(stripped)
+                if (
+                    method_match
+                    and not class_match
+                    and not stripped.startswith("if")
+                    and not stripped.startswith("while")
+                    and not stripped.startswith("switch")
+                ):
+                    m_name = method_match.group(1)
+                    if m_name not in {"if", "for", "while", "catch", "switch", "return"}:
+                        m_qname = f"{current_class_qname}.{m_name}"
                         symbols.append(
                             ParsedSymbol(
-                                name=func_name,
-                                qualified_name=func_qname,
-                                symbol_type="function",
-                                start_line=start_line,
-                                end_line=end_line,
+                                name=m_name,
+                                qualified_name=m_qname,
+                                symbol_type="method",
+                                start_line=idx,
+                                end_line=idx,
+                                metadata={"parent_class": current_class},
                             )
                         )
                         edges.append(
                             ParsedEdge(
-                                source=parent_scope,
-                                target=func_qname,
+                                source=current_class_qname,
+                                target=m_qname,
                                 edge_type="contains",
-                                line_number=start_line,
+                                line_number=idx,
                             )
                         )
-                        traverse(value_node, func_qname, current_class=None)
 
-        for child in root_node.children:
-            traverse(child, module_qname)
+            # Track brace depth
+            current_brace_depth += line.count("{") - line.count("}")
+            if current_class and current_brace_depth < class_brace_depth:
+                current_class = None
+                current_class_qname = None
 
-        cyclomatic_complexity = float(max(1, 1 + decision_count))
+            # Calls
+            call_matches = re.finditer(r"\b([A-Za-z0-9_$.]+)\s*\(", line)
+            for cm in call_matches:
+                called = cm.group(1).strip()
+                if (
+                    called
+                    not in {
+                        "if",
+                        "for",
+                        "while",
+                        "catch",
+                        "switch",
+                        "function",
+                        "return",
+                        "require",
+                        "console.log",
+                        "console.error",
+                        "console.warn",
+                        "import",
+                    }
+                    and not called.endswith(".forEach")
+                    and not called.endswith(".map")
+                ):
+                    caller = current_class_qname or module_qname
+                    edges.append(
+                        ParsedEdge(
+                            source=caller,
+                            target=called,
+                            edge_type="calls",
+                            line_number=idx,
+                        )
+                    )
 
         return FileAnalysisResult(
             file_path=rel_path,

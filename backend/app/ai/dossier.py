@@ -21,10 +21,11 @@ class EvidenceDossierBuilder:
         fn_stmt = (
             select(FileNode)
             .where(FileNode.analysis_run_id == run_id)
-            .where(FileNode.path.ilike(f"%{norm_path}%"))
+            .where((FileNode.path == norm_path) | (FileNode.path.ilike(f"%{norm_path}%")))
+            .limit(1)
         )
         fn_res = await db.execute(fn_stmt)
-        file_node = fn_res.scalar_one_or_none()
+        file_node = fn_res.scalars().first()
 
         metrics = {}
         if file_node:
@@ -74,10 +75,11 @@ class EvidenceDossierBuilder:
         churn_stmt = (
             select(GitFileChurn)
             .where(GitFileChurn.analysis_run_id == run_id)
-            .where(GitFileChurn.file_path.ilike(f"%{norm_path}%"))
+            .where((GitFileChurn.file_path == norm_path) | (GitFileChurn.file_path.ilike(f"%{norm_path}%")))
+            .limit(1)
         )
         churn_res = await db.execute(churn_stmt)
-        churn_obj = churn_res.scalar_one_or_none()
+        churn_obj = churn_res.scalars().first()
         churn_info = {}
         if churn_obj:
             churn_info = {

@@ -12,10 +12,21 @@ class SecurityError(Exception):
 # Allowed Git URL schemes
 ALLOWED_SCHEMES = {"https", "http", "git", "ssh"}
 
-# GitHub / Git URL validation pattern
+# GitHub / Git URL validation pattern (supports subgroups and auth tokens)
 GIT_URL_REGEX = re.compile(
-    r"^(https?://|git@|ssh://git@)[a-zA-Z0-9.\-_]+[:/][a-zA-Z0-9.\-_]+/[a-zA-Z0-9.\-_]+(\.git)?/?$"
+    r"^(https?://|git@|ssh://(?:git@)?)[a-zA-Z0-9.\-_]+[:/](?:[a-zA-Z0-9.\-_]+/)+[a-zA-Z0-9.\-_]+(\.git)?/?$"
 )
+
+
+def mask_repo_url(url: str) -> str:
+    """Masks authentication credentials from repository URL for safe logging/display."""
+    if "@" in url and "://" in url:
+        return re.sub(
+            r"://([^@]+)@",
+            lambda m: f"://{m.group(1).split(':')[0]}:***@" if ":" in m.group(1) else "://***@",
+            url,
+        )
+    return url
 
 
 def validate_repo_url(url: str) -> str:

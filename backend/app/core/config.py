@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     GIT_CLONE_TIMEOUT_SECONDS: int = 60
     ANALYSIS_TIMEOUT_SECONDS: int = 300
 
+    # Git & Private Repository Authentication
+    GITHUB_TOKEN: str = ""
+    GIT_TOKEN: str = ""
+    GIT_USERNAME: str = ""
+
     # AI / LLM Configuration
     LLM_PROVIDER: str = "mock"  # mock, openai, gemini
     OPENAI_API_KEY: str = ""
